@@ -139,11 +139,18 @@ router.post("/control/:deviceId/pump", authRequired, async (req, res) => {
   if (!device) {
     return res.status(404).json({ message: "Device not found" });
   }
+  if (on && device.rainLockActive) {
+    await broadcastNotification(`Pump ON blocked for ${deviceId}: rain lock is active.`);
+    return res.status(409).json({ message: "Pump blocked: rain is detected for this device." });
+  }
   if (typeof on !== "boolean") {
     return res.status(400).json({ message: "on must be true or false" });
   }
 
   device.desiredPumpState = on;
+  if (!on) {
+    device.pumpOnSince = null;
+  }
   await device.save();
   await SensorReading.create({ deviceId, pumpState: on, source: "manual" });
   console.log(`[CONTROL] Pump request for ${deviceId}: on=${on}`);
@@ -172,6 +179,7 @@ router.post("/control/:deviceId/kill", authRequired, async (req, res) => {
   if (enabled) {
     // Keep pump desired state false while kill switch is active.
     device.desiredPumpState = false;
+    device.pumpOnSince = null;
   }
   await device.save();
   console.log(`[CONTROL] Kill request for ${deviceId}: enabled=${enabled}`);
@@ -195,18 +203,49 @@ router.post("/devices/:deviceId/telemetry", async (req, res) => {
   }
   const { deviceId } = req.params;
   try {
-    const { reading, desiredPumpState } = await saveTelemetry({
+    const {
+      reading,
+      desiredPumpState,
+      killSwitchActive,
+      rainLockActive,
+      rainLockTriggered,
+      rainLockMessage,
+      pumpStateChanged,
+      pumpState,
+      pumpRuntimeGuardTriggered,
+      pumpRuntimeGuardMessage,
+    } = await saveTelemetry({
       deviceId,
       payload: req.body,
       source: "device",
     });
     const device = await Device.findOne({ deviceId });
-    const killSwitchActive = Boolean(device?.killSwitchActive);
+    const effectiveKillSwitchActive = Boolean(device?.killSwitchActive ?? killSwitchActive);
+    const effectiveRainLockActive = Boolean(device?.rainLockActive ?? rainLockActive);
+    const telemetryMessage = rainLockTriggered
+      ? rainLockMessage
+      : pumpRuntimeGuardTriggered
+        ? pumpRuntimeGuardMessage
+        : "Telemetry stored";
+    if (rainLockTriggered) {
+      await broadcastNotification(`Rain detected on ${deviceId}. Pump locked OFF.`);
+    }
+    if (pumpRuntimeGuardTriggered) {
+      await broadcastNotification(
+        `Safety stop on ${deviceId}: pump ran over 3 minutes. Kill switch enabled.`
+      );
+    }
+    if (pumpStateChanged) {
+      await broadcastNotification(`Pump state changed on ${deviceId}: ${pumpState ? "ON" : "OFF"}.`);
+    }
 
     return res.status(201).json({
-      message: "Telemetry stored",
-      desiredPumpState: killSwitchActive ? false : desiredPumpState,
-      killSwitchActive,
+      message: telemetryMessage,
+      desiredPumpState: effectiveKillSwitchActive || effectiveRainLockActive ? false : desiredPumpState,
+      killSwitchActive: effectiveKillSwitchActive,
+      rainLockActive: effectiveRainLockActive,
+      rainLockTriggered,
+      pumpRuntimeGuardTriggered,
       reading,
     });
   } catch (error) {
@@ -241,6 +280,14 @@ router.post("/twilio/webhook", express.urlencoded({ extended: false }), async (r
   let message = "";
 
   if (command.action === "pump_on") {
+    if (device.rainLockActive) {
+      await broadcastNotification(`Pump ON blocked for ${deviceId}: rain lock is active.`);
+      message = ["Rain lock is active", `Device: ${deviceId}`, "Pump ON command is blocked while raining."].join(
+        "\n"
+      );
+      res.type("text/xml");
+      return res.send(twimlResponse(message));
+    }
     device.desiredPumpState = true;
     device.killSwitchActive = false;
     await device.save();
@@ -257,6 +304,7 @@ router.post("/twilio/webhook", express.urlencoded({ extended: false }), async (r
   } else if (command.action === "auto") {
     device.desiredPumpState = false;
     device.killSwitchActive = false;
+    device.pumpOnSince = null;
     await device.save();
     publishPumpCommand(deviceId, false, { withRetry: true });
     await SensorReading.create({ deviceId, pumpState: false, source: "manual" });
@@ -267,6 +315,7 @@ router.post("/twilio/webhook", express.urlencoded({ extended: false }), async (r
   } else if (command.action === "kill") {
     device.killSwitchActive = true;
     device.desiredPumpState = false;
+    device.pumpOnSince = null;
     await device.save();
     publishPumpCommand(deviceId, false, { killSwitchActive: true, withRetry: true });
     message = [
@@ -320,6 +369,11 @@ router.get("/recommendation/:deviceId", authRequired, async (req, res) => {
     temperature: latest.temperature,
     humidity: latest.humidity,
     soilMoisture: latest.soilMoisture,
+    nitrogen: req.query.nitrogen,
+    phosphorus: req.query.phosphorus,
+    potassium: req.query.potassium,
+    ph: req.query.ph,
+    rainfall: req.query.rainfall,
   });
 
   return res.json({

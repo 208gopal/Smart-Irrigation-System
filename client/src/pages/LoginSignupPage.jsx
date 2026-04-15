@@ -25,15 +25,15 @@ export default function LoginSignupPage({ mode, onAuth }) {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-emerald-900 to-slate-900 px-4">
-      <div className="w-full max-w-md bg-white/10 backdrop-blur-xl border border-white/20 rounded-2xl shadow-2xl p-8 text-white">
+    <div className="min-h-screen flex items-center justify-center bg-linear-to-br from-[#fdfbf6] via-[#f9f5ef] to-[#f5efe6] px-4">
+      <div className="w-full max-w-md bg-[#fffdf8]/95 backdrop-blur-xl border border-stone-200 rounded-2xl shadow-2xl p-8 text-slate-800">
         
         {/* Title */}
         <h2 className="text-3xl font-bold text-center mb-2">
           {mode === "login" ? "Welcome Back" : "Create Account"}
         </h2>
 
-        <p className="text-center text-gray-300 mb-6 text-sm">
+        <p className="text-center text-slate-600 mb-6 text-sm">
           {mode === "login"
             ? "Login to access your smart irrigation dashboard"
             : "Sign up to start monitoring your farm"}
@@ -43,7 +43,7 @@ export default function LoginSignupPage({ mode, onAuth }) {
         <form onSubmit={submit} className="flex flex-col gap-4">
           {mode === "signup" && (
             <input
-              className="px-4 py-3 rounded-lg bg-white/20 border border-white/20 placeholder-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+              className="px-4 py-3 rounded-lg bg-white border border-stone-300 placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-600"
               placeholder="Full name"
               value={form.name}
               onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
@@ -53,7 +53,7 @@ export default function LoginSignupPage({ mode, onAuth }) {
 
           <input
             type="email"
-            className="px-4 py-3 rounded-lg bg-white/20 border border-white/20 placeholder-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+            className="px-4 py-3 rounded-lg bg-white border border-stone-300 placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-600"
             placeholder="Email"
             value={form.email}
             onChange={(e) => setForm((p) => ({ ...p, email: e.target.value }))}
@@ -62,7 +62,7 @@ export default function LoginSignupPage({ mode, onAuth }) {
 
           <input
             type="password"
-            className="px-4 py-3 rounded-lg bg-white/20 border border-white/20 placeholder-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+            className="px-4 py-3 rounded-lg bg-white border border-stone-300 placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-600"
             placeholder="Password"
             value={form.password}
             onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))}
@@ -70,11 +70,11 @@ export default function LoginSignupPage({ mode, onAuth }) {
           />
 
           {error && (
-            <p className="text-red-400 text-sm text-center">{error}</p>
+            <p className="text-rose-700 text-sm text-center">{error}</p>
           )}
 
           <button
-            className="mt-2 bg-emerald-500 hover:bg-emerald-600 transition py-3 rounded-lg font-semibold shadow-lg"
+            className="mt-2 bg-emerald-700 text-white hover:bg-emerald-800 transition py-3 rounded-lg font-semibold shadow-lg"
             type="submit"
           >
             {mode === "login" ? "Login" : "Sign Up"}
@@ -82,11 +82,11 @@ export default function LoginSignupPage({ mode, onAuth }) {
         </form>
 
         {/* Footer */}
-        <p className="text-center text-gray-300 mt-6 text-sm">
+        <p className="text-center text-slate-600 mt-6 text-sm">
           {mode === "login" ? "New user?" : "Already have an account?"}{" "}
           <Link
             to={mode === "login" ? "/signup" : "/login"}
-            className="text-emerald-400 hover:underline"
+            className="text-emerald-700 hover:underline"
           >
             {mode === "login" ? "Create one" : "Login"}
           </Link>

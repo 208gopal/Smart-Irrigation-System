@@ -68,6 +68,30 @@ function hourLabel(timestamp) {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function MiniLineChart({ points, color = "#10b981", min = 0, max = 100 }) {
+  const width = 320;
+  const height = 110;
+  if (!Array.isArray(points) || points.length === 0) {
+    return <div className="text-xs text-slate-500">No data yet.</div>;
+  }
+
+  const span = max - min || 1;
+  const path = points
+    .map((point, index) => {
+      const x = points.length === 1 ? 0 : (index / (points.length - 1)) * (width - 1);
+      const normalized = (point.value - min) / span;
+      const y = (1 - Math.max(0, Math.min(1, normalized))) * (height - 1);
+      return `${x},${y}`;
+    })
+    .join(" ");
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-28 rounded bg-stone-100 border border-stone-200">
+      <polyline fill="none" stroke={color} strokeWidth="2.5" points={path} />
+    </svg>
+  );
+}
+
 export default function DashboardPage({ user, onLogout }) {
   const [devices, setDevices] = useState([]);
   const [activeDeviceId, setActiveDeviceId] = useState("");
@@ -90,6 +114,17 @@ export default function DashboardPage({ user, onLogout }) {
   const [forecast, setForecast] = useState(null);
   const [forecastError, setForecastError] = useState("");
   const [selectedForecastDate, setSelectedForecastDate] = useState("");
+  const [analyticsByDevice, setAnalyticsByDevice] = useState({});
+  const [recommendations, setRecommendations] = useState([]);
+  const [recommendationLoading, setRecommendationLoading] = useState(false);
+  const [recommendationError, setRecommendationError] = useState("");
+  const [mlInputs, setMlInputs] = useState({
+    nitrogen: "",
+    phosphorus: "",
+    potassium: "",
+    ph: "",
+    rainfall: "",
+  });
 
   const fetchDevices = async () => {
     const { data } = await api.get("/devices/my");
@@ -116,7 +151,37 @@ export default function DashboardPage({ user, onLogout }) {
       })
     );
 
-    setLatestByDevice(Object.fromEntries(results));
+    const nextLatestByDevice = Object.fromEntries(results);
+    setLatestByDevice(nextLatestByDevice);
+
+    setAnalyticsByDevice((prev) => {
+      const next = { ...prev };
+      const now = Date.now();
+      targetDevices.forEach((device) => {
+        const latest = nextLatestByDevice[device.deviceId];
+        if (!latest) return;
+        const row = {
+          ts: now,
+          temperature: typeof latest.temperature === "number" ? latest.temperature : null,
+          humidity: typeof latest.humidity === "number" ? latest.humidity : null,
+          soilMoisture: typeof latest.soilMoisture === "number" ? latest.soilMoisture : null,
+          waterLevel: typeof latest.waterLevel === "number" ? latest.waterLevel : null,
+        };
+        const existing = Array.isArray(next[device.deviceId]) ? next[device.deviceId] : [];
+        const last = existing[existing.length - 1];
+        if (
+          last &&
+          last.temperature === row.temperature &&
+          last.humidity === row.humidity &&
+          last.soilMoisture === row.soilMoisture &&
+          last.waterLevel === row.waterLevel
+        ) {
+          return;
+        }
+        next[device.deviceId] = [...existing, row].slice(-30);
+      });
+      return next;
+    });
   };
 
   const fetchWeather = async () => {
@@ -325,52 +390,100 @@ export default function DashboardPage({ user, onLogout }) {
     setPlaceSuggestions([]);
   };
 
+  const fetchRecommendations = async (deviceId) => {
+    if (!deviceId) return;
+    setRecommendationLoading(true);
+    setRecommendationError("");
+    try {
+      const params = {};
+      Object.entries(mlInputs).forEach(([key, value]) => {
+        const trimmed = String(value || "").trim();
+        if (trimmed) params[key] = trimmed;
+      });
+      const { data } = await api.get(`/recommendation/${deviceId}`, { params });
+      setRecommendations(Array.isArray(data?.recommendations) ? data.recommendations : []);
+    } catch (err) {
+      setRecommendations([]);
+      setRecommendationError(err.response?.data?.message || "Failed to fetch crop recommendations");
+    } finally {
+      setRecommendationLoading(false);
+    }
+  };
+
+  const onMlInputChange = (key, value) => {
+    setMlInputs((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const resetMlInputs = () => {
+    setMlInputs({
+      nitrogen: "",
+      phosphorus: "",
+      potassium: "",
+      ph: "",
+      rainfall: "",
+    });
+  };
+
   const selectedForecastDay = forecast?.daily?.find((d) => d.date === selectedForecastDate);
   const selectedForecastSlots =
     forecast?.hourlyByDay?.find((d) => d.date === selectedForecastDate)?.slots || [];
+  const activeDeviceLatest = activeDeviceId ? latestByDevice[activeDeviceId] : null;
+  const analyticsSeries = activeDeviceId ? analyticsByDevice[activeDeviceId] || [] : [];
+  const tempPoints = analyticsSeries
+    .filter((p) => typeof p.temperature === "number")
+    .map((p) => ({ ts: p.ts, value: p.temperature }));
+  const humidityPoints = analyticsSeries
+    .filter((p) => typeof p.humidity === "number")
+    .map((p) => ({ ts: p.ts, value: p.humidity }));
+  const soilPoints = analyticsSeries
+    .filter((p) => typeof p.soilMoisture === "number")
+    .map((p) => ({ ts: p.ts, value: p.soilMoisture }));
+  const waterPoints = analyticsSeries
+    .filter((p) => typeof p.waterLevel === "number")
+    .map((p) => ({ ts: p.ts, value: p.waterLevel }));
 
   return (
-    <div className="min-h-screen bg-linear-to-br from-slate-900 via-emerald-900 to-slate-900 text-white p-6">
+    <div className="min-h-screen bg-linear-to-br from-[#fdfbf6] via-[#f9f5ef] to-[#f5efe6] text-slate-800 p-6">
       {/* Topbar */}
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold">Welcome, {user?.name || "Farmer"}</h1>
         <button
           onClick={onLogout}
-          className="px-4 py-2 bg-red-500 rounded-lg hover:bg-red-600 transition"
+          className="px-4 py-2 bg-rose-600 text-white rounded-lg hover:bg-rose-700 transition"
         >
           Logout
         </button>
       </div>
 
       {/* Link Device */}
-      <div className="bg-white/10 backdrop-blur-lg p-6 rounded-2xl mb-6 border border-white/20">
+      <div className="bg-[#fffdf8]/90 backdrop-blur-lg p-6 rounded-2xl mb-6 border border-stone-200 shadow-sm">
         <h2 className="text-xl font-semibold mb-4">Link Device</h2>
         <form onSubmit={linkDevice} className="flex flex-col md:flex-row gap-3">
           <input
-            className="flex-1 px-4 py-2 rounded-lg bg-white/20 border border-white/20 placeholder-gray-300"
+            className="flex-1 px-4 py-2 rounded-lg bg-white border border-stone-300 placeholder-stone-400"
             placeholder="Device ID"
             value={deviceInput}
             onChange={(e) => setDeviceInput(e.target.value)}
             required
           />
           <input
-            className="flex-1 px-4 py-2 rounded-lg bg-white/20 border border-white/20 placeholder-gray-300"
+            className="flex-1 px-4 py-2 rounded-lg bg-white border border-stone-300 placeholder-stone-400"
             placeholder="Label"
             value={labelInput}
             onChange={(e) => setLabelInput(e.target.value)}
           />
-          <button className="px-6 py-2 bg-emerald-500 rounded-lg hover:bg-emerald-600">
+          <button className="px-6 py-2 bg-emerald-700 text-white rounded-lg hover:bg-emerald-800">
             Link
           </button>
         </form>
-        {message && <p className="mt-3 text-sm text-gray-300">{message}</p>}
+        {message && <p className="mt-3 text-sm text-slate-600">{message}</p>}
       </div>
 
       {/* Main Grid */}
       <div className="grid md:grid-cols-2 gap-6">
 
         {/* Devices */}
-        <div className="bg-white/10 p-5 rounded-2xl border border-white/20">
+        <div className="bg-[#fffdf8]/90 p-5 rounded-2xl border border-stone-200 shadow-sm">
           <h3 className="font-semibold mb-3">My Devices</h3>
           {devices.map((d) => (
             <div
@@ -378,13 +491,13 @@ export default function DashboardPage({ user, onLogout }) {
               onClick={() => setActiveDeviceId(d.deviceId)}
               className={`text-left px-4 py-2 rounded-lg mb-2 transition cursor-pointer ${
                 activeDeviceId === d.deviceId
-                  ? "bg-emerald-500"
-                  : "bg-white/10 hover:bg-white/20"
+                  ? "bg-emerald-100 border border-emerald-300"
+                  : "bg-white border border-stone-200 hover:bg-stone-100"
               }`}
             >
               <div className="font-medium">{d.label}</div>
-              <div className="text-xs text-gray-300">{d.deviceId}</div>
-              <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-gray-200">
+              <div className="text-xs text-slate-500">{d.deviceId}</div>
+              <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-slate-600">
                 <div>Temp: {latestByDevice[d.deviceId]?.temperature ?? "--"}°C</div>
                 <div>Humidity: {latestByDevice[d.deviceId]?.humidity ?? "--"}%</div>
                 <div>Soil: {latestByDevice[d.deviceId]?.soilMoisture ?? "--"}%</div>
@@ -397,7 +510,7 @@ export default function DashboardPage({ user, onLogout }) {
                     e.stopPropagation();
                     togglePumpForDevice(d.deviceId, true);
                   }}
-                  className="flex-1 bg-emerald-600 py-1 rounded text-xs"
+                  className="flex-1 bg-emerald-700 text-white py-1 rounded text-xs hover:bg-emerald-800"
                 >
                   ON
                 </button>
@@ -407,7 +520,7 @@ export default function DashboardPage({ user, onLogout }) {
                     e.stopPropagation();
                     togglePumpForDevice(d.deviceId, false);
                   }}
-                  className="flex-1 bg-red-600 py-1 rounded text-xs"
+                  className="flex-1 bg-amber-700 text-white py-1 rounded text-xs hover:bg-amber-800"
                 >
                   AUTO
                 </button>
@@ -418,7 +531,7 @@ export default function DashboardPage({ user, onLogout }) {
                     setKillSwitch(d.deviceId, !d.killSwitchActive);
                   }}
                   className={`px-2 py-1 rounded text-xs ${
-                    d.killSwitchActive ? "bg-yellow-600" : "bg-red-700"
+                    d.killSwitchActive ? "bg-amber-600 text-white" : "bg-rose-700 text-white"
                   }`}
                 >
                   {d.killSwitchActive ? "UN-KILL" : "KILL"}
@@ -429,11 +542,11 @@ export default function DashboardPage({ user, onLogout }) {
         </div>
 
         {/* Weather Updates */}
-        <div className="bg-white/10 p-5 rounded-2xl border border-white/20">
+        <div className="bg-[#fffdf8]/90 p-5 rounded-2xl border border-stone-200 shadow-sm">
           <h3 className="font-semibold mb-3">Weather Updates</h3>
 
           <div className="mb-3 flex flex-col gap-2 text-xs">
-            <span className="text-gray-400">Location for forecast</span>
+            <span className="text-slate-500">Location for forecast</span>
             <div className="flex flex-wrap gap-3">
               <label className="inline-flex items-center gap-2 cursor-pointer">
                 <input
@@ -465,14 +578,14 @@ export default function DashboardPage({ user, onLogout }) {
             {weatherSource === "custom" ? (
               <div className="relative mt-1 space-y-2">
                 {selectedPlace ? (
-                  <div className="rounded-lg bg-white/10 border border-white/15 p-2 text-sm">
-                    <p className="text-emerald-200/95 leading-snug line-clamp-3">{selectedPlace.label}</p>
-                    <p className="text-[11px] text-gray-400 mt-1">
+                  <div className="rounded-lg bg-white border border-stone-200 p-2 text-sm">
+                    <p className="text-emerald-700 leading-snug line-clamp-3">{selectedPlace.label}</p>
+                    <p className="text-[11px] text-slate-500 mt-1">
                       {selectedPlace.lat.toFixed(4)}, {selectedPlace.lon.toFixed(4)}
                     </p>
                     <button
                       type="button"
-                      className="mt-2 text-xs text-emerald-300 hover:text-emerald-200 underline"
+                      className="mt-2 text-xs text-emerald-700 hover:text-emerald-800 underline"
                       onClick={clearSelectedPlace}
                     >
                       Change place
@@ -483,7 +596,7 @@ export default function DashboardPage({ user, onLogout }) {
                     <input
                       type="search"
                       autoComplete="off"
-                      className="w-full px-3 py-2 rounded-lg bg-white/15 border border-white/20 placeholder-gray-400 text-sm"
+                      className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 placeholder-stone-400 text-sm"
                       placeholder="Street, farm, village, city, landmark…"
                       value={placeSearch}
                       onChange={(e) => setPlaceSearch(e.target.value)}
@@ -491,18 +604,18 @@ export default function DashboardPage({ user, onLogout }) {
                       aria-expanded={placeSuggestions.length > 0}
                     />
                     {placeSearchLoading && (
-                      <p className="text-[11px] text-gray-400">Searching…</p>
+                      <p className="text-[11px] text-slate-500">Searching…</p>
                     )}
                     {placeSuggestions.length > 0 && (
                       <ul
-                        className="absolute z-20 left-0 right-0 mt-1 max-h-52 overflow-y-auto rounded-lg border border-white/20 bg-slate-900/95 shadow-xl text-sm"
+                        className="absolute z-20 left-0 right-0 mt-1 max-h-52 overflow-y-auto rounded-lg border border-stone-300 bg-[#fffdf8] shadow-xl text-sm"
                         role="listbox"
                       >
                         {placeSuggestions.map((s) => (
                           <li key={s.id} role="option">
                             <button
                               type="button"
-                              className="w-full text-left px-3 py-2 hover:bg-white/10 border-b border-white/5 last:border-0 leading-snug"
+                              className="w-full text-left px-3 py-2 hover:bg-stone-100 border-b border-stone-200 last:border-0 leading-snug"
                               onMouseDown={(e) => e.preventDefault()}
                               onClick={() => pickPlace(s)}
                             >
@@ -512,13 +625,13 @@ export default function DashboardPage({ user, onLogout }) {
                         ))}
                       </ul>
                     )}
-                    <p className="text-[10px] text-gray-500 leading-relaxed">
+                    <p className="text-[10px] text-slate-500 leading-relaxed">
                       Places via{" "}
                       <a
                         href="https://www.openstreetmap.org"
                         target="_blank"
                         rel="noreferrer"
-                        className="text-emerald-400/90 hover:underline"
+                        className="text-emerald-700 hover:underline"
                       >
                         OpenStreetMap
                       </a>{" "}
@@ -528,33 +641,33 @@ export default function DashboardPage({ user, onLogout }) {
                 )}
               </div>
             ) : !geoReady ? (
-              <p className="text-gray-300">Detecting your location…</p>
+              <p className="text-slate-600">Detecting your location…</p>
             ) : locationCoords ? (
-              <p className="text-gray-300">
+              <p className="text-slate-600">
                 Using GPS:{" "}
-                <span className="text-emerald-200/90">
+                <span className="text-emerald-700">
                   {locationCoords.lat.toFixed(4)}, {locationCoords.lon.toFixed(4)}
                 </span>
               </p>
             ) : (
-              <p className="text-amber-200/90">
-                No GPS — add a server fallback in <code className="text-gray-200">server/.env</code> or switch to
+              <p className="text-amber-700">
+                No GPS — add a server fallback in <code className="text-slate-700">server/.env</code> or switch to
                 Search a place.
               </p>
             )}
           </div>
 
-          <div className="mb-3 inline-flex rounded-lg bg-white/10 p-1 text-xs">
+          <div className="mb-3 inline-flex rounded-lg bg-stone-100 p-1 text-xs">
             <button
               type="button"
-              className={`px-3 py-1 rounded-md ${weatherView === "current" ? "bg-emerald-500" : "hover:bg-white/10"}`}
+              className={`px-3 py-1 rounded-md ${weatherView === "current" ? "bg-emerald-700 text-white" : "hover:bg-stone-200"}`}
               onClick={() => setWeatherView("current")}
             >
               Current
             </button>
             <button
               type="button"
-              className={`px-3 py-1 rounded-md ${weatherView === "weekly" ? "bg-emerald-500" : "hover:bg-white/10"}`}
+              className={`px-3 py-1 rounded-md ${weatherView === "weekly" ? "bg-emerald-700 text-white" : "hover:bg-stone-200"}`}
               onClick={() => setWeatherView("weekly")}
             >
               7-day planner
@@ -563,12 +676,12 @@ export default function DashboardPage({ user, onLogout }) {
 
           {weatherView === "weekly" ? (
             !forecast ? (
-              <p className="text-sm text-gray-300">
+              <p className="text-sm text-slate-600">
                 {forecastError || "Loading weekly forecast..."}
               </p>
             ) : (
               <div className="space-y-3 text-sm">
-                <p className="text-xs text-gray-400">
+                <p className="text-xs text-slate-500">
                   Daily outlook with hourly slots ({forecast.timezone || "local time"}).
                 </p>
                 <div className="grid grid-cols-2 gap-2">
@@ -578,13 +691,13 @@ export default function DashboardPage({ user, onLogout }) {
                       type="button"
                       className={`text-left rounded-lg border px-2 py-2 ${
                         selectedForecastDate === day.date
-                          ? "bg-emerald-500/30 border-emerald-300/40"
-                          : "bg-white/5 border-white/10 hover:bg-white/10"
+                          ? "bg-emerald-100 border-emerald-300"
+                          : "bg-white border-stone-200 hover:bg-stone-100"
                       }`}
                       onClick={() => setSelectedForecastDate(day.date)}
                     >
-                      <div className="text-xs text-emerald-200">{dayLabel(day.date)}</div>
-                      <div className="text-xs text-gray-300">{weatherCodeLabel(day.weatherCode)}</div>
+                      <div className="text-xs text-emerald-700">{dayLabel(day.date)}</div>
+                      <div className="text-xs text-slate-600">{weatherCodeLabel(day.weatherCode)}</div>
                       <div className="text-xs">
                         {day.tempMax ?? "--"}{forecast.units?.temperature || ""} / {day.tempMin ?? "--"}{forecast.units?.temperature || ""}
                       </div>
@@ -593,21 +706,21 @@ export default function DashboardPage({ user, onLogout }) {
                 </div>
 
                 {selectedForecastDay ? (
-                  <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-                    <div className="text-emerald-200 font-medium">{dayLabel(selectedForecastDay.date)}</div>
-                    <div className="text-xs text-gray-300">
+                  <div className="rounded-lg border border-stone-200 bg-white p-3">
+                    <div className="text-emerald-700 font-medium">{dayLabel(selectedForecastDay.date)}</div>
+                    <div className="text-xs text-slate-600">
                       Rain chance: {selectedForecastDay.precipitationProbabilityMax ?? "--"}{forecast.units?.precipitationProbability || "%"} | Sunrise:{" "}
                       {selectedForecastDay.sunrise ? hourLabel(selectedForecastDay.sunrise) : "--"} | Sunset:{" "}
                       {selectedForecastDay.sunset ? hourLabel(selectedForecastDay.sunset) : "--"}
                     </div>
                     <div className="mt-2 max-h-44 overflow-y-auto space-y-1 text-xs">
                       {selectedForecastSlots.length === 0 ? (
-                        <p className="text-gray-400">No hourly slots available.</p>
+                        <p className="text-slate-500">No hourly slots available.</p>
                       ) : (
                         selectedForecastSlots.map((slot) => (
                           <div
                             key={slot.time}
-                            className="flex justify-between rounded bg-black/20 px-2 py-1"
+                            className="flex justify-between rounded bg-stone-100 px-2 py-1"
                           >
                             <span>{hourLabel(slot.time)}</span>
                             <span>{weatherCodeLabel(slot.weatherCode)}</span>
@@ -629,14 +742,14 @@ export default function DashboardPage({ user, onLogout }) {
 
           {weatherView === "current" ? (
             !weather ? (
-              <p className="text-sm text-gray-300">
+              <p className="text-sm text-slate-600">
                 {weatherError ||
                   "Could not load weather yet. Ensure OPENWEATHER_API_KEY is set in server/.env and the API server was restarted."}
               </p>
             ) : (
               <div className="space-y-2 text-sm">
-                <div className="text-emerald-300 font-medium">{weather.location || "Configured location"}</div>
-                <div className="capitalize text-gray-200">{weather.description}</div>
+                <div className="text-emerald-700 font-medium">{weather.location || "Configured location"}</div>
+                <div className="capitalize text-slate-700">{weather.description}</div>
                 <div>Temperature: {weather.temperature ?? "--"}{weather.units === "metric" ? "°C" : "°F"}</div>
                 <div>Feels Like: {weather.feelsLike ?? "--"}{weather.units === "metric" ? "°C" : "°F"}</div>
                 <div>Humidity: {weather.humidity ?? "--"}%</div>
@@ -647,6 +760,125 @@ export default function DashboardPage({ user, onLogout }) {
           ) : null}
         </div>
 
+      </div>
+
+      <div className="mt-6 bg-[#fffdf8]/90 p-5 rounded-2xl border border-stone-200 shadow-sm">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+          <div>
+            <h3 className="font-semibold">Crop Recommendation (ML)</h3>
+            <p className="text-xs text-slate-600">
+              Device: <span className="text-emerald-700">{activeDeviceId || "No device selected"}</span>
+            </p>
+            <p className="text-xs text-slate-500 mt-1">
+              Live used: Temp {activeDeviceLatest?.temperature ?? "--"} C, Humidity{" "}
+              {activeDeviceLatest?.humidity ?? "--"} %, Soil Moisture {activeDeviceLatest?.soilMoisture ?? "--"} %
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => fetchRecommendations(activeDeviceId)}
+              disabled={!activeDeviceId || recommendationLoading}
+              className="px-4 py-2 bg-emerald-700 text-white rounded-lg hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {recommendationLoading ? "Loading..." : "Get Recommendations"}
+            </button>
+            <button
+              type="button"
+              onClick={resetMlInputs}
+              className="px-4 py-2 bg-stone-200 rounded-lg hover:bg-stone-300"
+            >
+              Clear ML Inputs
+            </button>
+          </div>
+        </div>
+
+        <div className="grid md:grid-cols-5 gap-2 mb-4">
+          <input
+            className="px-3 py-2 rounded-lg bg-white border border-stone-300 text-sm placeholder-stone-400"
+            placeholder="Nitrogen (N)"
+            value={mlInputs.nitrogen}
+            onChange={(e) => onMlInputChange("nitrogen", e.target.value)}
+          />
+          <input
+            className="px-3 py-2 rounded-lg bg-white border border-stone-300 text-sm placeholder-stone-400"
+            placeholder="Phosphorus (P)"
+            value={mlInputs.phosphorus}
+            onChange={(e) => onMlInputChange("phosphorus", e.target.value)}
+          />
+          <input
+            className="px-3 py-2 rounded-lg bg-white border border-stone-300 text-sm placeholder-stone-400"
+            placeholder="Potassium (K)"
+            value={mlInputs.potassium}
+            onChange={(e) => onMlInputChange("potassium", e.target.value)}
+          />
+          <input
+            className="px-3 py-2 rounded-lg bg-white border border-stone-300 text-sm placeholder-stone-400"
+            placeholder="pH"
+            value={mlInputs.ph}
+            onChange={(e) => onMlInputChange("ph", e.target.value)}
+          />
+          <input
+            className="px-3 py-2 rounded-lg bg-white border border-stone-300 text-sm placeholder-stone-400"
+            placeholder="Rainfall (mm)"
+            value={mlInputs.rainfall}
+            onChange={(e) => onMlInputChange("rainfall", e.target.value)}
+          />
+        </div>
+
+        {recommendationError ? (
+          <p className="text-sm text-rose-700">{recommendationError}</p>
+        ) : recommendations.length === 0 ? (
+          <p className="text-sm text-slate-600">
+            Click <span className="text-emerald-700">Get Recommendations</span> to run ML crop prediction.
+          </p>
+        ) : (
+          <div className="grid md:grid-cols-3 gap-3">
+            {recommendations.map((item, idx) => (
+              <div key={`${item.seed}-${idx}`} className="rounded-xl border border-stone-200 bg-white p-4">
+                <div className="text-emerald-700 font-semibold">{item.seed}</div>
+                <div className="text-xs text-slate-600 mt-1">Confidence: {item.score}%</div>
+                <div className="mt-2 h-2 bg-stone-200 rounded-full overflow-hidden">
+                  <div className="h-full bg-emerald-700" style={{ width: `${Math.max(0, Math.min(100, item.score))}%` }} />
+                </div>
+                <p className="text-xs text-slate-600 mt-2 leading-relaxed">{item.reason}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-6 bg-[#fffdf8]/90 p-5 rounded-2xl border border-stone-200 shadow-sm">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold">Real-Time Analytics</h3>
+          <p className="text-xs text-slate-600">
+            Real-time trends (last {analyticsSeries.length || 0} samples) for{" "}
+            <span className="text-emerald-700">{activeDeviceId || "selected device"}</span>
+          </p>
+        </div>
+
+        {!activeDeviceId ? (
+          <p className="text-sm text-slate-600">Select a device to view analytics.</p>
+        ) : (
+          <div className="grid md:grid-cols-2 gap-4">
+            <div className="rounded-xl border border-stone-200 bg-white p-3">
+              <div className="text-sm font-medium text-emerald-700 mb-2">Temperature (C)</div>
+              <MiniLineChart points={tempPoints} color="#f97316" min={0} max={50} />
+            </div>
+            <div className="rounded-xl border border-stone-200 bg-white p-3">
+              <div className="text-sm font-medium text-emerald-700 mb-2">Humidity (%)</div>
+              <MiniLineChart points={humidityPoints} color="#22c55e" min={0} max={100} />
+            </div>
+            <div className="rounded-xl border border-stone-200 bg-white p-3">
+              <div className="text-sm font-medium text-emerald-700 mb-2">Soil Moisture (%)</div>
+              <MiniLineChart points={soilPoints} color="#0ea5e9" min={0} max={100} />
+            </div>
+            <div className="rounded-xl border border-stone-200 bg-white p-3">
+              <div className="text-sm font-medium text-emerald-700 mb-2">Water Level (%)</div>
+              <MiniLineChart points={waterPoints} color="#a855f7" min={0} max={100} />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

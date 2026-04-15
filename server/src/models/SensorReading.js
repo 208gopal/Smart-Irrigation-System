@@ -7,6 +7,7 @@ const sensorReadingSchema = new mongoose.Schema(
     humidity: { type: Number },
     soilMoisture: { type: Number },
     waterLevel: { type: Number },
+    rainDetected: { type: Boolean, default: false },
     pumpState: { type: Boolean, default: false },
     batteryVoltage: { type: Number },
     solarVoltage: { type: Number },

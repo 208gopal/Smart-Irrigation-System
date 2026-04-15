@@ -6,7 +6,10 @@ const deviceSchema = new mongoose.Schema(
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     label: { type: String, default: "My Field Device", trim: true },
     desiredPumpState: { type: Boolean, default: false },
+    lastPumpState: { type: Boolean, default: null },
     killSwitchActive: { type: Boolean, default: false },
+    rainLockActive: { type: Boolean, default: false },
+    pumpOnSince: { type: Date, default: null },
     lastSeenAt: { type: Date },
   },
   { timestamps: true }

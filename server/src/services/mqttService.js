@@ -1,5 +1,6 @@
 import mqtt from "mqtt";
 import { saveTelemetry } from "./telemetryService.js";
+import { broadcastNotification } from "./twilioService.js";
 
 let mqttClient = null;
 const pendingCommands = new Map();
@@ -79,7 +80,22 @@ export const initMqtt = () => {
       const isTelemetryTopic = topic.endsWith("/telemetry") || topic.endsWith("/data");
       if (!deviceId || !isTelemetryTopic) return;
       const payload = JSON.parse(messageBuffer.toString());
-      await saveTelemetry({ deviceId, payload, source: "device" });
+      const result = await saveTelemetry({ deviceId, payload, source: "device" });
+      if (result?.pumpStateChanged) {
+        await broadcastNotification(`Pump state changed on ${deviceId}: ${result.pumpState ? "ON" : "OFF"}.`);
+      }
+      if (result?.rainLockTriggered) {
+        publishPumpCommand(deviceId, false, { killSwitchActive: false, withRetry: true });
+        console.warn(`[SAFETY] ${deviceId}: ${result.rainLockMessage}`);
+        await broadcastNotification(`Rain detected on ${deviceId}. Pump locked OFF.`);
+      }
+      if (result?.pumpRuntimeGuardTriggered) {
+        publishPumpCommand(deviceId, false, { killSwitchActive: true, withRetry: true });
+        console.warn(`[SAFETY] ${deviceId}: ${result.pumpRuntimeGuardMessage}`);
+        await broadcastNotification(
+          `Safety stop on ${deviceId}: pump ran over 3 minutes. Kill switch enabled.`
+        );
+      }
     } catch (error) {
       console.error("MQTT telemetry handling error:", error.message);
     }

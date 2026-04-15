@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import api from "../api";
 
 const WEATHER_SOURCE_KEY = "smart-irrigation-weather-source";
@@ -73,7 +73,7 @@ export default function DashboardPage({ user, onLogout }) {
   const [activeDeviceId, setActiveDeviceId] = useState("");
   const [deviceInput, setDeviceInput] = useState("");
   const [labelInput, setLabelInput] = useState("");
-  const [latest, setLatest] = useState(null);
+  const [latestByDevice, setLatestByDevice] = useState({});
   const [weather, setWeather] = useState(null);
   const [weatherError, setWeatherError] = useState("");
   const [message, setMessage] = useState("");
@@ -91,11 +91,6 @@ export default function DashboardPage({ user, onLogout }) {
   const [forecastError, setForecastError] = useState("");
   const [selectedForecastDate, setSelectedForecastDate] = useState("");
 
-  const active = useMemo(
-    () => devices.find((d) => d.deviceId === activeDeviceId),
-    [devices, activeDeviceId]
-  );
-
   const fetchDevices = async () => {
     const { data } = await api.get("/devices/my");
     setDevices(data);
@@ -104,10 +99,24 @@ export default function DashboardPage({ user, onLogout }) {
     }
   };
 
-  const fetchLatest = async (deviceId) => {
-    if (!deviceId) return;
-    const { data } = await api.get(`/devices/${deviceId}/latest`);
-    setLatest(data.latest);
+  const fetchLatestForDevices = async (targetDevices) => {
+    if (!Array.isArray(targetDevices) || targetDevices.length === 0) {
+      setLatestByDevice({});
+      return;
+    }
+
+    const results = await Promise.all(
+      targetDevices.map(async (device) => {
+        try {
+          const { data } = await api.get(`/devices/${device.deviceId}/latest`);
+          return [device.deviceId, data.latest ?? null];
+        } catch {
+          return [device.deviceId, null];
+        }
+      })
+    );
+
+    setLatestByDevice(Object.fromEntries(results));
   };
 
   const fetchWeather = async () => {
@@ -197,10 +206,10 @@ export default function DashboardPage({ user, onLogout }) {
   }, []);
 
   useEffect(() => {
-    fetchLatest(activeDeviceId);
-    const timer = setInterval(() => fetchLatest(activeDeviceId), 5000);
+    fetchLatestForDevices(devices);
+    const timer = setInterval(() => fetchLatestForDevices(devices), 5000);
     return () => clearInterval(timer);
-  }, [activeDeviceId]);
+  }, [devices]);
 
   useEffect(() => {
     const customReady = weatherSource === "custom" && selectedPlace;
@@ -291,9 +300,7 @@ export default function DashboardPage({ user, onLogout }) {
     if (!deviceId) return;
     const { data } = await api.post(`/control/${deviceId}/pump`, { on });
     setMessage(data.message);
-    if (activeDeviceId === deviceId) {
-      fetchLatest(activeDeviceId);
-    }
+    fetchLatestForDevices(devices);
   };
 
   const setKillSwitch = async (deviceId, enabled) => {
@@ -323,7 +330,7 @@ export default function DashboardPage({ user, onLogout }) {
     forecast?.hourlyByDay?.find((d) => d.date === selectedForecastDate)?.slots || [];
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-emerald-900 to-slate-900 text-white p-6">
+    <div className="min-h-screen bg-linear-to-br from-slate-900 via-emerald-900 to-slate-900 text-white p-6">
       {/* Topbar */}
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold">Welcome, {user?.name || "Farmer"}</h1>
@@ -360,7 +367,7 @@ export default function DashboardPage({ user, onLogout }) {
       </div>
 
       {/* Main Grid */}
-      <div className="grid md:grid-cols-3 gap-6">
+      <div className="grid md:grid-cols-2 gap-6">
 
         {/* Devices */}
         <div className="bg-white/10 p-5 rounded-2xl border border-white/20">
@@ -377,6 +384,14 @@ export default function DashboardPage({ user, onLogout }) {
             >
               <div className="font-medium">{d.label}</div>
               <div className="text-xs text-gray-300">{d.deviceId}</div>
+              <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-gray-200">
+                <div>Temp: {latestByDevice[d.deviceId]?.temperature ?? "--"}°C</div>
+                <div>Humidity: {latestByDevice[d.deviceId]?.humidity ?? "--"}%</div>
+                <div>Soil: {latestByDevice[d.deviceId]?.soilMoisture ?? "--"}%</div>
+                <div>Water: {latestByDevice[d.deviceId]?.waterLevel ?? "--"}%</div>
+                <div>Battery: {latestByDevice[d.deviceId]?.batteryVoltage ?? "--"}V</div>
+                <div>Solar: {latestByDevice[d.deviceId]?.solarVoltage ?? "--"}V</div>
+              </div>
               <div className="mt-2 flex gap-2">
                 <button
                   type="button"
@@ -396,7 +411,7 @@ export default function DashboardPage({ user, onLogout }) {
                   }}
                   className="flex-1 bg-red-600 py-1 rounded text-xs"
                 >
-                  OFF/AUTO
+                  AUTO
                 </button>
                 <button
                   type="button"
@@ -413,38 +428,6 @@ export default function DashboardPage({ user, onLogout }) {
               </div>
             </div>
           ))}
-        </div>
-
-        {/* Sensor Data */}
-        <div className="bg-white/10 p-5 rounded-2xl border border-white/20">
-          <h3 className="font-semibold mb-3">Live Data</h3>
-          {active ? (
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              <div>Temp: {latest?.temperature ?? "--"}°C</div>
-              <div>Humidity: {latest?.humidity ?? "--"}%</div>
-              <div>Soil: {latest?.soilMoisture ?? "--"}%</div>
-              <div>Water: {latest?.waterLevel ?? "--"}%</div>
-              <div>Battery: {latest?.batteryVoltage ?? "--"}V</div>
-              <div>Solar: {latest?.solarVoltage ?? "--"}V</div>
-            </div>
-          ) : (
-            <p>Select a device</p>
-          )}
-
-          <div className="mt-4 flex gap-2">
-            <button
-              onClick={() => togglePumpForDevice(activeDeviceId, true)}
-              className="flex-1 bg-emerald-500 py-2 rounded-lg"
-            >
-              ON
-            </button>
-            <button
-              onClick={() => togglePumpForDevice(activeDeviceId, false)}
-              className="flex-1 bg-red-500 py-2 rounded-lg"
-            >
-              OFF
-            </button>
-          </div>
         </div>
 
         {/* Weather Updates */}

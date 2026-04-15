@@ -122,7 +122,8 @@ router.post("/control/:deviceId/pump", authRequired, async (req, res) => {
   device.desiredPumpState = on;
   await device.save();
   await SensorReading.create({ deviceId, pumpState: on, source: "manual" });
-  const mqttPublished = publishPumpCommand(deviceId, on);
+  console.log(`[CONTROL] Pump request for ${deviceId}: on=${on}`);
+  const mqttPublished = publishPumpCommand(deviceId, on, { withRetry: true });
 
   return res.json({
     message: `Pump turned ${on ? "ON" : "OFF"}`,
@@ -148,7 +149,8 @@ router.post("/control/:deviceId/kill", authRequired, async (req, res) => {
     device.desiredPumpState = false;
   }
   await device.save();
-  publishPumpCommand(deviceId, false);
+  console.log(`[CONTROL] Kill request for ${deviceId}: enabled=${enabled}`);
+  publishPumpCommand(deviceId, false, { killSwitchActive: enabled, withRetry: true });
 
   return res.json({
     message: enabled
@@ -172,8 +174,6 @@ router.post("/devices/:deviceId/telemetry", async (req, res) => {
     });
     const device = await Device.findOne({ deviceId });
     const killSwitchActive = Boolean(device?.killSwitchActive);
-
-    publishPumpCommand(deviceId, killSwitchActive ? false : desiredPumpState);
 
     return res.status(201).json({
       message: "Telemetry stored",

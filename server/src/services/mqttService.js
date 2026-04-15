@@ -2,15 +2,45 @@ import mqtt from "mqtt";
 import { saveTelemetry } from "./telemetryService.js";
 
 let mqttClient = null;
+const pendingCommands = new Map();
 
 const topicPrefix = () => process.env.MQTT_TOPIC_PREFIX || "smart-irrigation";
-const telemetryTopic = () => `${topicPrefix()}/+/telemetry`;
-const pumpCommandTopic = (deviceId) => `${topicPrefix()}/${deviceId}/pump/set`;
+const telemetryTopics = () => [`${topicPrefix()}/+/telemetry`, `${topicPrefix()}/+/data`];
+const controlTopics = (deviceId) => [
+  `${topicPrefix()}/${deviceId}/control`,
+  `${topicPrefix()}/${deviceId}/pump/set`,
+];
 
 const parseDeviceIdFromTopic = (topic) => {
   const parts = topic.split("/");
   if (parts.length < 3) return null;
   return parts[1];
+};
+
+const buildControlPayload = (on, options = {}) => {
+  const normalizedOn = Boolean(on);
+  const normalizedKill = Boolean(options.killSwitchActive);
+  return {
+    // Keep payload minimal for constrained device parsers.
+    pump: normalizedOn,
+    kill: normalizedKill,
+  };
+};
+
+const publishControlPayload = (deviceId, payload) => {
+  if (!mqttClient || !mqttClient.connected) return false;
+  const message = JSON.stringify(payload);
+  controlTopics(deviceId).forEach((topic) => {
+    // Use qos0 for widest compatibility with PubSubClient subscriptions.
+    mqttClient.publish(topic, message, { qos: 0, retain: false }, (err) => {
+      if (err) {
+        console.error(`MQTT control publish failed (${topic}):`, err.message);
+        return;
+      }
+      console.log(`[MQTT CONTROL] Published ${topic}: ${message}`);
+    });
+  });
+  return true;
 };
 
 export const initMqtt = () => {
@@ -28,22 +58,28 @@ export const initMqtt = () => {
 
   mqttClient.on("connect", () => {
     console.log("MQTT connected");
-    mqttClient.subscribe(telemetryTopic(), (err) => {
+    const topics = telemetryTopics();
+    mqttClient.subscribe(topics, (err) => {
       if (err) {
         console.error("MQTT subscribe failed:", err.message);
-      } else {
-        console.log(`MQTT subscribed: ${telemetryTopic()}`);
+        return;
       }
+      topics.forEach((topic) => console.log(`MQTT subscribed: ${topic}`));
+    });
+
+    // If a command was issued during a reconnect window, flush it immediately.
+    pendingCommands.forEach((pending, deviceId) => {
+      publishControlPayload(deviceId, pending.payload);
     });
   });
 
   mqttClient.on("message", async (topic, messageBuffer) => {
     try {
       const deviceId = parseDeviceIdFromTopic(topic);
-      if (!deviceId || !topic.endsWith("/telemetry")) return;
+      const isTelemetryTopic = topic.endsWith("/telemetry") || topic.endsWith("/data");
+      if (!deviceId || !isTelemetryTopic) return;
       const payload = JSON.parse(messageBuffer.toString());
-      const result = await saveTelemetry({ deviceId, payload, source: "device" });
-      publishPumpCommand(deviceId, result.desiredPumpState);
+      await saveTelemetry({ deviceId, payload, source: "device" });
     } catch (error) {
       console.error("MQTT telemetry handling error:", error.message);
     }
@@ -54,8 +90,26 @@ export const initMqtt = () => {
   });
 };
 
-export const publishPumpCommand = (deviceId, on) => {
-  if (!mqttClient || !mqttClient.connected) return false;
-  mqttClient.publish(pumpCommandTopic(deviceId), JSON.stringify({ on: Boolean(on) }), { qos: 1 });
-  return true;
+export const publishPumpCommand = (deviceId, on, options = {}) => {
+  const withRetry = Boolean(options.withRetry);
+  const payload = buildControlPayload(on, options);
+  pendingCommands.set(deviceId, { payload, sentAt: Date.now() });
+
+  // Retry only for user-initiated control actions to avoid stale command races.
+  const attemptDelays = withRetry ? [0, 300, 900] : [0];
+  attemptDelays.forEach((delayMs) => {
+    setTimeout(() => {
+      publishControlPayload(deviceId, payload);
+    }, delayMs);
+  });
+
+  // Keep latest command for reconnect fallback for a short window.
+  setTimeout(() => {
+    const pending = pendingCommands.get(deviceId);
+    if (pending && pending.payload.pump === payload.pump && pending.payload.kill === payload.kill) {
+      pendingCommands.delete(deviceId);
+    }
+  }, 10000);
+
+  return Boolean(mqttClient && mqttClient.connected);
 };

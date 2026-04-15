@@ -389,8 +389,6 @@ export default function DashboardPage({ user, onLogout }) {
                 <div>Humidity: {latestByDevice[d.deviceId]?.humidity ?? "--"}%</div>
                 <div>Soil: {latestByDevice[d.deviceId]?.soilMoisture ?? "--"}%</div>
                 <div>Water: {latestByDevice[d.deviceId]?.waterLevel ?? "--"}%</div>
-                <div>Battery: {latestByDevice[d.deviceId]?.batteryVoltage ?? "--"}V</div>
-                <div>Solar: {latestByDevice[d.deviceId]?.solarVoltage ?? "--"}V</div>
               </div>
               <div className="mt-2 flex gap-2">
                 <button

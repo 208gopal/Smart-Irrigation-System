@@ -8,6 +8,12 @@ import { authRequired } from "./middleware/auth.js";
 import { recommendSeeds } from "./services/recommendationService.js";
 import { publishPumpCommand } from "./services/mqttService.js";
 import { saveTelemetry } from "./services/telemetryService.js";
+import {
+  broadcastNotification,
+  isSenderAllowed,
+  parseTwilioCommand,
+  twimlResponse,
+} from "./services/twilioService.js";
 
 export const router = express.Router();
 
@@ -21,6 +27,24 @@ const allowedDeviceIds = () =>
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+
+const defaultTwilioDeviceId = () =>
+  String(process.env.TWILIO_CONTROL_DEVICE_ID || "").trim() ||
+  allowedDeviceIds()[0] ||
+  "";
+
+const commandHelpText = () =>
+  [
+    "Smart Irrigation Controls",
+    "",
+    "Available commands:",
+    "• pump on  - turn pump ON manually",
+    "• auto     - return to AUTO mode",
+    "• kill     - emergency stop (kill switch ON)",
+    "• getinfo  - latest device telemetry",
+    "",
+    "Tip: send one command per message.",
+  ].join("\n");
 
 router.get("/health", (_req, res) => res.json({ ok: true }));
 
@@ -124,6 +148,7 @@ router.post("/control/:deviceId/pump", authRequired, async (req, res) => {
   await SensorReading.create({ deviceId, pumpState: on, source: "manual" });
   console.log(`[CONTROL] Pump request for ${deviceId}: on=${on}`);
   const mqttPublished = publishPumpCommand(deviceId, on, { withRetry: true });
+  await broadcastNotification(`Pump command for ${deviceId}: ${on ? "ON" : "AUTO/OFF"}`);
 
   return res.json({
     message: `Pump turned ${on ? "ON" : "OFF"}`,
@@ -151,6 +176,9 @@ router.post("/control/:deviceId/kill", authRequired, async (req, res) => {
   await device.save();
   console.log(`[CONTROL] Kill request for ${deviceId}: enabled=${enabled}`);
   publishPumpCommand(deviceId, false, { killSwitchActive: enabled, withRetry: true });
+  await broadcastNotification(
+    `Kill switch for ${deviceId}: ${enabled ? "ENABLED" : "DISABLED"}`
+  );
 
   return res.json({
     message: enabled
@@ -187,6 +215,94 @@ router.post("/devices/:deviceId/telemetry", async (req, res) => {
     }
     throw error;
   }
+});
+
+router.post("/twilio/webhook", express.urlencoded({ extended: false }), async (req, res) => {
+  const from = String(req.body?.From || "").trim();
+  const body = String(req.body?.Body || "");
+  if (!isSenderAllowed(from)) {
+    res.type("text/xml");
+    return res.send(twimlResponse("Unauthorized number."));
+  }
+
+  const deviceId = defaultTwilioDeviceId();
+  if (!deviceId) {
+    res.type("text/xml");
+    return res.send(twimlResponse("No device configured. Set TWILIO_CONTROL_DEVICE_ID."));
+  }
+
+  const device = await Device.findOne({ deviceId });
+  if (!device) {
+    res.type("text/xml");
+    return res.send(twimlResponse(`Device ${deviceId} not found.`));
+  }
+
+  const command = parseTwilioCommand(body);
+  let message = "";
+
+  if (command.action === "pump_on") {
+    device.desiredPumpState = true;
+    device.killSwitchActive = false;
+    await device.save();
+    publishPumpCommand(deviceId, true, { withRetry: true });
+    await SensorReading.create({ deviceId, pumpState: true, source: "manual" });
+    message = [
+      "Pump turned ON",
+      `Device: ${deviceId}`,
+      "Mode: Manual",
+      "",
+      "Use 'auto' to return control to automation.",
+    ].join("\n");
+    await broadcastNotification(`SMS command: Pump ON for ${deviceId}`);
+  } else if (command.action === "auto") {
+    device.desiredPumpState = false;
+    device.killSwitchActive = false;
+    await device.save();
+    publishPumpCommand(deviceId, false, { withRetry: true });
+    await SensorReading.create({ deviceId, pumpState: false, source: "manual" });
+    message = ["AUTO mode enabled", `Device: ${deviceId}`, "Pump control returned to automation."].join(
+      "\n"
+    );
+    await broadcastNotification(`SMS command: AUTO mode for ${deviceId}`);
+  } else if (command.action === "kill") {
+    device.killSwitchActive = true;
+    device.desiredPumpState = false;
+    await device.save();
+    publishPumpCommand(deviceId, false, { killSwitchActive: true, withRetry: true });
+    message = [
+      "Emergency stop enabled",
+      `Device: ${deviceId}`,
+      "Kill switch: ON",
+      "",
+      "Pump is forced OFF until kill switch is disabled from app/API.",
+    ].join("\n");
+    await broadcastNotification(`SMS command: KILL enabled for ${deviceId}`);
+  } else if (command.action === "get_info") {
+    const latest = await SensorReading.findOne({ deviceId }).sort({ createdAt: -1 });
+    if (!latest) {
+      message = ["Device status", `Device: ${deviceId}`, "", "No telemetry available yet."].join("\n");
+    } else {
+      message =
+        [
+          "Device status",
+          `Device: ${deviceId}`,
+          "",
+          `Temp: ${latest.temperature ?? "--"} C`,
+          `Humidity: ${latest.humidity ?? "--"} %`,
+          `Soil moisture: ${latest.soilMoisture ?? "--"}`,
+          `Water level: ${latest.waterLevel ?? "--"}`,
+          `Pump: ${latest.pumpState ? "ON" : "OFF"}`,
+          `Kill switch: ${device.killSwitchActive ? "ON" : "OFF"}`,
+        ].join("\n");
+    }
+  } else if (command.action === "help") {
+    message = commandHelpText();
+  } else {
+    message = ["I did not understand that command.", "", commandHelpText()].join("\n");
+  }
+
+  res.type("text/xml");
+  return res.send(twimlResponse(message));
 });
 
 router.get("/recommendation/:deviceId", authRequired, async (req, res) => {

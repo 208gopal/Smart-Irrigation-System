@@ -25,8 +25,9 @@ const char *MQTT_TOPIC_PREFIX = "smart-irrigation";
 const char *DEVICE_ID = "DEVICE-esp";
 
 // -------- SETTINGS --------
-const int SOIL_DRY_THRESHOLD = 2000;
-const int WATER_MIN_THRESHOLD = 1000;
+const int ADC_MAX = 4095;
+const int DEFAULT_SOIL_DRY_THRESHOLD_PERCENT = 35;
+const int DEFAULT_WATER_MIN_THRESHOLD_PERCENT = 20;
 const unsigned long TELEMETRY_INTERVAL_MS = 5000;
 const unsigned long WIFI_RETRY_MS = 8000;
 const unsigned long MQTT_RETRY_MS = 2500;
@@ -39,11 +40,14 @@ PubSubClient mqttClient(wifiClient);
 // -------- MQTT TOPICS --------
 String telemetryTopic;
 String controlTopic;
+String pumpSetTopic;
 
 // -------- GLOBAL STATE --------
 bool killSwitch = false;
 bool manualMode = false;
 volatile bool publishNowRequested = false;
+int soilDryThresholdPercent = DEFAULT_SOIL_DRY_THRESHOLD_PERCENT;
+int waterMinThresholdPercent = DEFAULT_WATER_MIN_THRESHOLD_PERCENT;
 
 unsigned long lastTelemetryMs = 0;
 unsigned long lastWifiAttemptMs = 0;
@@ -73,8 +77,19 @@ void ensureWiFiConnected() {
 }
 
 // -------- AUTO LOGIC --------
+int clampPercentToRaw(int percent) {
+  int clamped = percent;
+  if (clamped < 0) clamped = 0;
+  if (clamped > 100) clamped = 100;
+  // Soil sensor: higher raw = drier, so convert moisture% to inverse ADC threshold.
+  return ((100 - clamped) * ADC_MAX) / 100;
+}
+
 void autoControl(int soil, int water) {
-  if (soil < SOIL_DRY_THRESHOLD && water > WATER_MIN_THRESHOLD) {
+  int soilDryThresholdRaw = clampPercentToRaw(soilDryThresholdPercent);
+  int waterMinThresholdRaw = (waterMinThresholdPercent * ADC_MAX) / 100;
+
+  if (soil > soilDryThresholdRaw && water > waterMinThresholdRaw) {
     digitalWrite(RELAY_PIN, HIGH);
     Serial.println("AUTO: Pump ON");
   } else {
@@ -134,6 +149,8 @@ void applyControlNow(int soilRaw, int waterRaw, bool rainDetected) {
 
 // -------- MQTT MESSAGE --------
 void onMqttMessage(char *topic, byte *payload, unsigned int length) {
+  Serial.print("MQTT TOPIC RX: ");
+  Serial.println(topic);
   String msg;
   for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
 
@@ -145,6 +162,39 @@ void onMqttMessage(char *topic, byte *payload, unsigned int length) {
 
   if (doc.containsKey("kill")) killSwitch = doc["kill"];
   if (doc.containsKey("pump")) manualMode = doc["pump"];
+  if (doc.containsKey("soilThreshold")) {
+    int value = doc["soilThreshold"];
+    if (value >= 0 && value <= 100) {
+      int previous = soilDryThresholdPercent;
+      soilDryThresholdPercent = value;
+      if (previous != soilDryThresholdPercent) {
+        Serial.print("THRESHOLD UPDATE: soil ");
+        Serial.print(previous);
+        Serial.print("% -> ");
+        Serial.print(soilDryThresholdPercent);
+        Serial.println("%");
+      }
+    }
+  }
+  if (doc.containsKey("waterThreshold")) {
+    int value = doc["waterThreshold"];
+    if (value >= 0 && value <= 100) {
+      int previous = waterMinThresholdPercent;
+      waterMinThresholdPercent = value;
+      if (previous != waterMinThresholdPercent) {
+        Serial.print("THRESHOLD UPDATE: water ");
+        Serial.print(previous);
+        Serial.print("% -> ");
+        Serial.print(waterMinThresholdPercent);
+        Serial.println("%");
+      }
+    }
+  }
+  Serial.print("ACTIVE THRESHOLDS => Soil: ");
+  Serial.print(soilDryThresholdPercent);
+  Serial.print("%, Water: ");
+  Serial.print(waterMinThresholdPercent);
+  Serial.println("%");
 
   int soilRaw = analogRead(SOIL_PIN);
   int waterRaw = analogRead(WATER_LEVEL_PIN);
@@ -166,7 +216,12 @@ void ensureMqttConnected() {
 
   if (mqttClient.connect(DEVICE_ID, MQTT_USERNAME, MQTT_PASSWORD)) {
     mqttClient.subscribe(controlTopic.c_str(), 0);
+    mqttClient.subscribe(pumpSetTopic.c_str(), 0);
     Serial.println("MQTT connected");
+    Serial.print("Subscribed: ");
+    Serial.println(controlTopic);
+    Serial.print("Subscribed: ");
+    Serial.println(pumpSetTopic);
   }
 }
 
@@ -205,6 +260,7 @@ void setup() {
 
   telemetryTopic = String(MQTT_TOPIC_PREFIX) + "/" + DEVICE_ID + "/data";
   controlTopic   = String(MQTT_TOPIC_PREFIX) + "/" + DEVICE_ID + "/control";
+  pumpSetTopic   = String(MQTT_TOPIC_PREFIX) + "/" + DEVICE_ID + "/pump/set";
 
   mqttClient.setServer(MQTT_HOST, MQTT_PORT);
   mqttClient.setCallback(onMqttMessage);

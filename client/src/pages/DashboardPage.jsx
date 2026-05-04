@@ -3,6 +3,8 @@ import api from "../api";
 
 const WEATHER_SOURCE_KEY = "smart-irrigation-weather-source";
 const WEATHER_PLACE_KEY = "smart-irrigation-weather-place";
+const DEFAULT_SOIL_MOISTURE_THRESHOLD = 35;
+const DEFAULT_WATER_LEVEL_THRESHOLD = 20;
 
 function readStoredWeatherSource() {
   if (typeof window === "undefined") return "browser";
@@ -68,6 +70,13 @@ function hourLabel(timestamp) {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function isConnectedWithinWindow(timestamp, windowMs = 20000) {
+  if (!timestamp) return false;
+  const seenAtMs = new Date(timestamp).getTime();
+  if (!Number.isFinite(seenAtMs)) return false;
+  return Date.now() - seenAtMs <= windowMs;
+}
+
 function MiniLineChart({ points, color = "#10b981", min = 0, max = 100 }) {
   const width = 320;
   const height = 110;
@@ -118,6 +127,7 @@ export default function DashboardPage({ user, onLogout }) {
   const [recommendations, setRecommendations] = useState([]);
   const [recommendationLoading, setRecommendationLoading] = useState(false);
   const [recommendationError, setRecommendationError] = useState("");
+  const [thresholdInputsByDevice, setThresholdInputsByDevice] = useState({});
   const [mlInputs, setMlInputs] = useState({
     nitrogen: "",
     phosphorus: "",
@@ -424,6 +434,41 @@ export default function DashboardPage({ user, onLogout }) {
     });
   };
 
+  const saveThresholds = async (deviceId) => {
+    if (!deviceId) return;
+    const device = devices.find((d) => d.deviceId === deviceId);
+    const draft = thresholdInputsByDevice[deviceId] || {};
+    const soilMoistureThreshold = Number(
+      draft.soilMoistureThreshold ??
+        device?.soilMoistureThreshold ??
+        DEFAULT_SOIL_MOISTURE_THRESHOLD
+    );
+    const waterLevelThreshold = Number(
+      draft.waterLevelThreshold ?? device?.waterLevelThreshold ?? DEFAULT_WATER_LEVEL_THRESHOLD
+    );
+    if (
+      !Number.isFinite(soilMoistureThreshold) ||
+      !Number.isFinite(waterLevelThreshold) ||
+      soilMoistureThreshold < 0 ||
+      soilMoistureThreshold > 100 ||
+      waterLevelThreshold < 0 ||
+      waterLevelThreshold > 100
+    ) {
+      setMessage("Thresholds must be numbers between 0 and 100");
+      return;
+    }
+    try {
+      const { data } = await api.patch(`/devices/${deviceId}/thresholds`, {
+        soilMoistureThreshold,
+        waterLevelThreshold,
+      });
+      setMessage(data?.message || "Thresholds updated");
+      await fetchDevices();
+    } catch (err) {
+      setMessage(err.response?.data?.message || "Failed to update thresholds");
+    }
+  };
+
   const selectedForecastDay = forecast?.daily?.find((d) => d.date === selectedForecastDate);
   const selectedForecastSlots =
     forecast?.hourlyByDay?.find((d) => d.date === selectedForecastDate)?.slots || [];
@@ -495,13 +540,36 @@ export default function DashboardPage({ user, onLogout }) {
                   : "bg-white border border-stone-200 hover:bg-stone-100"
               }`}
             >
-              <div className="font-medium">{d.label}</div>
+              <div className="font-medium flex items-center justify-between gap-2">
+                <span>{d.label}</span>
+                {(() => {
+                  const latest = latestByDevice[d.deviceId];
+                  const connected = isConnectedWithinWindow(
+                    latest?.createdAt || latest?.updatedAt || d.lastSeenAt
+                  );
+                  return (
+                    <span
+                      className={`text-[10px] px-2 py-0.5 rounded-full border ${
+                        connected
+                          ? "bg-emerald-100 text-emerald-700 border-emerald-200"
+                          : "bg-rose-100 text-rose-700 border-rose-200"
+                      }`}
+                    >
+                      {connected ? "Connected" : "Disconnected"}
+                    </span>
+                  );
+                })()}
+              </div>
               <div className="text-xs text-slate-500">{d.deviceId}</div>
               <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-slate-600">
                 <div>Temp: {latestByDevice[d.deviceId]?.temperature ?? "--"}°C</div>
                 <div>Humidity: {latestByDevice[d.deviceId]?.humidity ?? "--"}%</div>
                 <div>Soil: {latestByDevice[d.deviceId]?.soilMoisture ?? "--"}%</div>
-                <div>Water: {latestByDevice[d.deviceId]?.waterLevel ?? "--"}%</div>
+                <div>
+                  Water: {latestByDevice[d.deviceId]?.waterLevel != null
+                    ? ((latestByDevice[d.deviceId].waterLevel / 4095.0) * 100).toFixed(1)
+                    : "--"}%
+                </div>
               </div>
               <div className="mt-2 flex gap-2">
                 <button
@@ -536,6 +604,69 @@ export default function DashboardPage({ user, onLogout }) {
                 >
                   {d.killSwitchActive ? "UN-KILL" : "KILL"}
                 </button>
+              </div>
+              <div className="mt-2 rounded-lg border border-stone-200 bg-stone-50 p-2">
+                <p className="text-[11px] font-medium text-slate-700 mb-2">Thresholds</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    className="px-2 py-1 rounded border border-stone-300 text-xs bg-white"
+                    placeholder="Soil threshold %"
+                    value={
+                      thresholdInputsByDevice[d.deviceId]?.soilMoistureThreshold ??
+                      String(d.soilMoistureThreshold ?? DEFAULT_SOIL_MOISTURE_THRESHOLD)
+                    }
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) =>
+                      setThresholdInputsByDevice((prev) => ({
+                        ...prev,
+                        [d.deviceId]: {
+                          ...(prev[d.deviceId] || {}),
+                          soilMoistureThreshold: e.target.value,
+                        },
+                      }))
+                    }
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    className="px-2 py-1 rounded border border-stone-300 text-xs bg-white"
+                    placeholder="Water threshold %"
+                    value={
+                      thresholdInputsByDevice[d.deviceId]?.waterLevelThreshold ??
+                      String(d.waterLevelThreshold ?? DEFAULT_WATER_LEVEL_THRESHOLD)
+                    }
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) =>
+                      setThresholdInputsByDevice((prev) => ({
+                        ...prev,
+                        [d.deviceId]: {
+                          ...(prev[d.deviceId] || {}),
+                          waterLevelThreshold: e.target.value,
+                        },
+                      }))
+                    }
+                  />
+                </div>
+                <div className="mt-2 flex items-center justify-between">
+                  <span className="text-[10px] text-slate-500">
+                    Default: Soil {DEFAULT_SOIL_MOISTURE_THRESHOLD}% / Water{" "}
+                    {DEFAULT_WATER_LEVEL_THRESHOLD}%
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      saveThresholds(d.deviceId);
+                    }}
+                    className="px-2 py-1 bg-emerald-700 text-white rounded text-xs hover:bg-emerald-800"
+                  >
+                    Save
+                  </button>
+                </div>
               </div>
             </div>
           ))}

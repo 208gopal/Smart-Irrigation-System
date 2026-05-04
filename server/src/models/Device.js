@@ -9,6 +9,8 @@ const deviceSchema = new mongoose.Schema(
     lastPumpState: { type: Boolean, default: null },
     killSwitchActive: { type: Boolean, default: false },
     rainLockActive: { type: Boolean, default: false },
+    soilMoistureThreshold: { type: Number, default: 35, min: 0, max: 100 },
+    waterLevelThreshold: { type: Number, default: 20, min: 0, max: 100 },
     pumpOnSince: { type: Date, default: null },
     lastSeenAt: { type: Date },
   },

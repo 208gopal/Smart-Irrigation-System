@@ -33,6 +33,9 @@ const defaultTwilioDeviceId = () =>
   allowedDeviceIds()[0] ||
   "";
 
+const DEFAULT_SOIL_MOISTURE_THRESHOLD = 35;
+const DEFAULT_WATER_LEVEL_THRESHOLD = 20;
+
 const commandHelpText = () =>
   [
     "Smart Irrigation Controls",
@@ -85,6 +88,47 @@ router.post("/auth/login", async (req, res) => {
 router.get("/devices/my", authRequired, async (req, res) => {
   const devices = await Device.find({ userId: req.user.id }).sort({ createdAt: -1 });
   return res.json(devices);
+});
+
+router.patch("/devices/:deviceId/thresholds", authRequired, async (req, res) => {
+  const { deviceId } = req.params;
+  const device = await Device.findOne({ deviceId, userId: req.user.id });
+  if (!device) {
+    return res.status(404).json({ message: "Device not found" });
+  }
+
+  const soilThresholdRaw = req.body?.soilMoistureThreshold;
+  const waterThresholdRaw = req.body?.waterLevelThreshold;
+  const nextSoil = Number(soilThresholdRaw);
+  const nextWater = Number(waterThresholdRaw);
+  if (
+    !Number.isFinite(nextSoil) ||
+    !Number.isFinite(nextWater) ||
+    nextSoil < 0 ||
+    nextSoil > 100 ||
+    nextWater < 0 ||
+    nextWater > 100
+  ) {
+    return res.status(400).json({
+      message: "soilMoistureThreshold and waterLevelThreshold must be numbers between 0 and 100",
+    });
+  }
+
+  device.soilMoistureThreshold = nextSoil;
+  device.waterLevelThreshold = nextWater;
+  await device.save();
+  publishPumpCommand(deviceId, device.desiredPumpState, {
+    killSwitchActive: device.killSwitchActive,
+    soilMoistureThreshold: device.soilMoistureThreshold ?? DEFAULT_SOIL_MOISTURE_THRESHOLD,
+    waterLevelThreshold: device.waterLevelThreshold ?? DEFAULT_WATER_LEVEL_THRESHOLD,
+    withRetry: true,
+  });
+
+  return res.json({
+    message: "Thresholds updated",
+    soilMoistureThreshold: device.soilMoistureThreshold,
+    waterLevelThreshold: device.waterLevelThreshold,
+  });
 });
 
 router.post("/devices/link", authRequired, async (req, res) => {
@@ -154,7 +198,11 @@ router.post("/control/:deviceId/pump", authRequired, async (req, res) => {
   await device.save();
   await SensorReading.create({ deviceId, pumpState: on, source: "manual" });
   console.log(`[CONTROL] Pump request for ${deviceId}: on=${on}`);
-  const mqttPublished = publishPumpCommand(deviceId, on, { withRetry: true });
+  const mqttPublished = publishPumpCommand(deviceId, on, {
+    soilMoistureThreshold: device.soilMoistureThreshold ?? DEFAULT_SOIL_MOISTURE_THRESHOLD,
+    waterLevelThreshold: device.waterLevelThreshold ?? DEFAULT_WATER_LEVEL_THRESHOLD,
+    withRetry: true,
+  });
   await broadcastNotification(`Pump command for ${deviceId}: ${on ? "ON" : "AUTO/OFF"}`);
 
   return res.json({
@@ -183,7 +231,12 @@ router.post("/control/:deviceId/kill", authRequired, async (req, res) => {
   }
   await device.save();
   console.log(`[CONTROL] Kill request for ${deviceId}: enabled=${enabled}`);
-  publishPumpCommand(deviceId, false, { killSwitchActive: enabled, withRetry: true });
+  publishPumpCommand(deviceId, false, {
+    killSwitchActive: enabled,
+    soilMoistureThreshold: device.soilMoistureThreshold ?? DEFAULT_SOIL_MOISTURE_THRESHOLD,
+    waterLevelThreshold: device.waterLevelThreshold ?? DEFAULT_WATER_LEVEL_THRESHOLD,
+    withRetry: true,
+  });
   await broadcastNotification(
     `Kill switch for ${deviceId}: ${enabled ? "ENABLED" : "DISABLED"}`
   );
@@ -291,7 +344,11 @@ router.post("/twilio/webhook", express.urlencoded({ extended: false }), async (r
     device.desiredPumpState = true;
     device.killSwitchActive = false;
     await device.save();
-    publishPumpCommand(deviceId, true, { withRetry: true });
+    publishPumpCommand(deviceId, true, {
+      soilMoistureThreshold: device.soilMoistureThreshold ?? DEFAULT_SOIL_MOISTURE_THRESHOLD,
+      waterLevelThreshold: device.waterLevelThreshold ?? DEFAULT_WATER_LEVEL_THRESHOLD,
+      withRetry: true,
+    });
     await SensorReading.create({ deviceId, pumpState: true, source: "manual" });
     message = [
       "Pump turned ON",
@@ -306,7 +363,11 @@ router.post("/twilio/webhook", express.urlencoded({ extended: false }), async (r
     device.killSwitchActive = false;
     device.pumpOnSince = null;
     await device.save();
-    publishPumpCommand(deviceId, false, { withRetry: true });
+    publishPumpCommand(deviceId, false, {
+      soilMoistureThreshold: device.soilMoistureThreshold ?? DEFAULT_SOIL_MOISTURE_THRESHOLD,
+      waterLevelThreshold: device.waterLevelThreshold ?? DEFAULT_WATER_LEVEL_THRESHOLD,
+      withRetry: true,
+    });
     await SensorReading.create({ deviceId, pumpState: false, source: "manual" });
     message = ["AUTO mode enabled", `Device: ${deviceId}`, "Pump control returned to automation."].join(
       "\n"
@@ -317,7 +378,12 @@ router.post("/twilio/webhook", express.urlencoded({ extended: false }), async (r
     device.desiredPumpState = false;
     device.pumpOnSince = null;
     await device.save();
-    publishPumpCommand(deviceId, false, { killSwitchActive: true, withRetry: true });
+    publishPumpCommand(deviceId, false, {
+      killSwitchActive: true,
+      soilMoistureThreshold: device.soilMoistureThreshold ?? DEFAULT_SOIL_MOISTURE_THRESHOLD,
+      waterLevelThreshold: device.waterLevelThreshold ?? DEFAULT_WATER_LEVEL_THRESHOLD,
+      withRetry: true,
+    });
     message = [
       "Emergency stop enabled",
       `Device: ${deviceId}`,

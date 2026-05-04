@@ -21,10 +21,14 @@ const parseDeviceIdFromTopic = (topic) => {
 const buildControlPayload = (on, options = {}) => {
   const normalizedOn = Boolean(on);
   const normalizedKill = Boolean(options.killSwitchActive);
+  const soilThreshold = Number(options.soilMoistureThreshold);
+  const waterThreshold = Number(options.waterLevelThreshold);
   return {
     // Keep payload minimal for constrained device parsers.
     pump: normalizedOn,
     kill: normalizedKill,
+    ...(Number.isFinite(soilThreshold) ? { soilThreshold } : {}),
+    ...(Number.isFinite(waterThreshold) ? { waterThreshold } : {}),
   };
 };
 
